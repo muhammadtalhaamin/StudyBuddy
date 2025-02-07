@@ -20,7 +20,7 @@ const ThemeToggleHeader = () => {
           <div className="flex items-center gap-2 pl-4">
             <Sparkles className="h-6 w-6 text-black dark:text-white" />
             <h1 className="text-left pl-2 text-black dark:text-white font-semibold">
-              AstroGPT Assistant
+              StudyBuddy
             </h1>
           </div>
           {mounted && (

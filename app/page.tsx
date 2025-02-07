@@ -386,7 +386,7 @@ const ChatUI = () => {
                       message.role === "assistant" ? "text-black" : "text-white"
                     }`}
                   >
-                    {message.role === "assistant" ? "AstroGPT Assistant" : "You"}
+                    {message.role === "assistant" ? "StudyBuddy Assistant" : "You"}
                   </span>
 
                   {message.files && message.files.length > 0 && (
