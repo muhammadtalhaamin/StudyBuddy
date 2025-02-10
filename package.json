@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.3",
     "@langchain/anthropic": "^0.3.11",
     "@langchain/community": "^0.3.24",
     "@langchain/core": "^0.3.30",

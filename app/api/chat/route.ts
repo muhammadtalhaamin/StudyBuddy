@@ -1,19 +1,14 @@
-import { NextResponse } from "next/server";
-import { ChatOpenAI } from "@langchain/openai";
-import { TextLoader } from "langchain/document_loaders/fs/text";
-import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
-import { CSVLoader } from "@langchain/community/document_loaders/fs/csv";
-import { Document } from "@langchain/core/documents";
-import { HumanMessage, AIMessage } from "@langchain/core/messages";
-import { BufferMemory } from "langchain/memory";
-import { ConversationChain } from "langchain/chains";
-import { ChatMessageHistory } from "@langchain/community/stores/message/in_memory";
+import { NextRequest } from 'next/server';
+import Anthropic from '@anthropic-ai/sdk';
 
-const chatSessions = new Map<string, ChatMessageHistory>();
+export const runtime = 'edge';
 
-// StudyGPT system prompt
-const StudyGPT_PROMPT = `
-You are StudyBuddy, an advanced AI learning assistant focused on creating personalized study experiences.
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY!,
+});
+
+// StudyBuddy system prompt
+const STUDY_PROMPT = `You are StudyBuddy, an advanced AI learning assistant focused on creating personalized study experiences. You MUST ONLY respond to questions related to academics, learning, and studying. For any other questions, politely redirect the user to ask study-related questions.
 
 CORE BEHAVIORS:
 1. Always structure responses using proper Markdown formatting
@@ -21,6 +16,7 @@ CORE BEHAVIORS:
 3. Generate topic-specific practice questions
 4. Provide concrete examples and explanations
 5. Maintain an encouraging, mentor-like tone
+6. Reject non-study related queries politely
 
 RESPONSE STRUCTURE:
 1. Start with a brief context summary
@@ -29,7 +25,6 @@ RESPONSE STRUCTURE:
 4. End with a clear next step or question
 
 STUDY PLAN FORMAT:
-\`\`\`markdown
 ## 📚 Study Plan: [Subject]
 
 ### Day 1: [Topic]
@@ -47,10 +42,8 @@ STUDY PLAN FORMAT:
 
 ### Next Steps
 [Clear action item with deadline]
-\`\`\`
 
 QUIZ FORMAT:
-\`\`\`markdown
 ## ✍️ Practice Quiz: [Topic]
 
 1. **[Concept]**
@@ -61,136 +54,84 @@ QUIZ FORMAT:
    - D) [Option]
 
 💡 Hint: [Relevant tip]
-\`\`\`
 
 RULES:
-1. Never use placeholder text like "{insert problems here}"
+1. Never use placeholder text
 2. Always provide real, relevant example problems
 3. Include specific time estimates for tasks
 4. Add checkpoints for progress tracking
 5. Maintain consistent formatting throughout
-`;
+6. For any non-study related questions, respond with: "I'm your StudyBuddy! I can help you with your studies, academic questions, and learning goals. Could you please ask me something related to your studies?"`;
 
-export async function POST(req: Request) {
+// Helper to process uploaded files
+async function processFiles(files: File[]): Promise<string> {
+  let fileContents = "";
+  
+  for (const file of files) {
+    const buffer = await file.arrayBuffer();
+    const fileName = file.name.toLowerCase();
+    const text = new TextDecoder().decode(buffer);
+    
+    fileContents += `Content from ${fileName}:\n${text}\n\n`;
+  }
+  
+  return fileContents;
+}
+
+export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
     const message = formData.get("message") as string;
     const sessionId = formData.get("sessionId") as string;
     const files = formData.getAll("files") as File[];
 
-    if (!chatSessions.has(sessionId)) {
-      chatSessions.set(sessionId, new ChatMessageHistory());
-    }
-    const chatHistory = chatSessions.get(sessionId)!;
+    // Process any uploaded files
+    const fileContents = files.length > 0 ? await processFiles(files) : "";
 
-    const memory = new BufferMemory({
-      chatHistory: chatHistory,
-      returnMessages: true,
-      memoryKey: "history",
-    });
+    // Create message content combining user message and file contents
+    const fullMessage = fileContents 
+      ? `User Question: ${message}\n\nReference Materials:\n${fileContents}`
+      : message;
 
-    // Process files and extract content
-    let fileContents = "";
-
-    if (files && files.length > 0) {
-      for (const file of files) {
-        const buffer = await file.arrayBuffer();
-        const fileName = file.name.toLowerCase();
-
-        try {
-          let content = "";
-          if (fileName.endsWith(".txt")) {
-            const text = new TextDecoder().decode(buffer);
-            content = `Content from ${fileName}:\n${text}\n\n`;
-          } else if (fileName.endsWith(".pdf")) {
-            const loader = new PDFLoader(
-              new Blob([buffer], { type: "application/pdf" }),
-              {
-                splitPages: false,
-              }
-            );
-            const docs = await loader.load();
-            content = `Content from ${fileName}:\n${docs
-              .map((doc) => doc.pageContent)
-              .join("\n")}\n\n`;
-          } else if (fileName.endsWith(".csv")) {
-            const text = new TextDecoder().decode(buffer);
-            const loader = new CSVLoader(
-              new Blob([text], { type: "text/csv" })
-            );
-            const docs = await loader.load();
-            content = `Content from ${fileName}:\n${docs
-              .map((doc) => doc.pageContent)
-              .join("\n")}\n\n`;
-          }
-          fileContents += content;
-        } catch (error) {
-          console.error(`Error processing file ${fileName}:`, error);
-          throw new Error(`Failed to process file ${fileName}`);
-        }
-      }
-    }
-
-    // Construct the full message with system prompt
-    const fullMessage = `${StudyGPT_PROMPT}\n\nUser Question: ${message}\n\n${fileContents}\n\nPlease analyze the above content and respond to the user's question according to the AstroGPT guidelines.`;
-
-    // Initialize chat model
-    const model = new ChatOpenAI({
-      modelName: "gpt-4",
-      streaming: true,
+    const response = await anthropic.messages.create({
+      model: 'claude-3-5-sonnet-20241022',
+      max_tokens: 4096,
       temperature: 0.7,
+      stream: true,
+      system: STUDY_PROMPT,
+      messages: [{ role: 'user', content: fullMessage }],
     });
 
-    // Create conversation chain
-    const chain = new ConversationChain({
-      llm: model,
-      memory: memory,
-    });
-
-    // Create readable stream for response
-    const readableStream = new ReadableStream({
+    // Create streaming response
+    const stream = new ReadableStream({
       async start(controller) {
+        const encoder = new TextEncoder();
         try {
-          const response = await chain.call(
-            { input: fullMessage },
-            {
-              callbacks: [
-                {
-                  handleLLMNewToken(token: string) {
-                    const data = JSON.stringify({ content: token });
-                    controller.enqueue(`data: ${data}\n\n`);
-                  },
-                },
-              ],
+          for await (const chunk of response) {
+            if (chunk.type === 'content_block_delta' && 'text' in chunk.delta) {
+              // Format as SSE
+              const data = JSON.stringify({ content: chunk.delta.text });
+              controller.enqueue(encoder.encode(`data: ${data}\n\n`));
             }
-          );
-
-          await chatHistory.addMessage(new HumanMessage(fullMessage));
-          await chatHistory.addMessage(new AIMessage(response.response));
-
-          controller.enqueue(
-            `data: ${JSON.stringify({ content: "[DONE]" })}\n\n`
-          );
+          }
+          // Send completion message
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: "[DONE]" })}\n\n`));
           controller.close();
         } catch (error) {
-          console.error("Streaming error:", error);
           controller.error(error);
         }
       },
     });
 
-    return new Response(readableStream, {
+    return new Response(stream, {
       headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
       },
     });
   } catch (error) {
-    console.error("Error in chat route:", error);
-    return NextResponse.json(
-      { error: "An error occurred while processing your request" },
-      { status: 500 }
-    );
+    console.error('StudyBuddy API Error:', error);
+    return new Response('Error processing your request', { status: 500 });
   }
 }
